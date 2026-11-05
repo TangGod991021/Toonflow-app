@@ -39,9 +39,19 @@ export async function getWorkspaceRoot(req: Request) {
 
 export function isLocalWorkspaceRequest(req: Request) {
   const origin = req.get("origin");
-  const localOrigin = `${req.protocol}://${req.get("host")}`;
+  // ACT: 反向代理（nginx）终止 TLS 时，req.protocol 为 http；同源校验需使用转发后的协议。
+  const forwardedProto = req.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const protocol = forwardedProto === "https" || forwardedProto === "http" ? forwardedProto : req.protocol;
+  const localOrigin = `${protocol}://${req.get("host")}`;
   const sameOrigin = origin === undefined ? req.get("referer")?.startsWith(`${localOrigin}/`) : origin === localOrigin;
-  return isLocalHostRequest(req) && sameOrigin && req.get("x-toonflow-workspace") === "1";
+  // ACT: 桌面宿主仍只允许本机管理；服务端宿主经反向代理时 socket 来源是 Docker 网关、Host 为域名，
+  // 本机判定会失败，改由同源校验把关（外部入口另有反向代理访问控制）；多租户与设备互联边界保持不变。
+  const multiTenantRestricted = Boolean(req.res?.locals.multiTenantWeb) ||
+    req.res?.locals.multiTenantUser?.role === "user" ||
+    (conf.get("settings", {}).multiTenantEnabled === true && req.res?.locals.multiTenantUser?.role !== "admin") ||
+    isMobileLinkRequest(req);
+  const remoteAllowed = !getRuntimePlatform().requiresLocalHost && !multiTenantRestricted;
+  return (isLocalHostRequest(req) || remoteAllowed) && sameOrigin && req.get("x-toonflow-workspace") === "1";
 }
 
 export async function resolveWorkspace(req: Request, path: string) {

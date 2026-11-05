@@ -1,6 +1,11 @@
 services:
   toonflow:
-    build: .
+    build:
+      context: .
+      args:
+        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+        APP_VERSION: ${APP_VERSION:-2.0.9}
     init: true
     restart: unless-stopped
     ports:

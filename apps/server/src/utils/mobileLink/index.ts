@@ -9,6 +9,7 @@ import { isAbsolute, posix } from "node:path";
 import { realpath, stat } from "@toonflow/file";
 import conf from "@/utils/conf";
 import { errorFromCause } from "@/lib/responseFormat";
+import { getRuntimePlatform } from "@/lib/platform";
 import { isEnabled } from "@/utils/multiTenant/mode";
 
 export type MobileLinkConfig = {
@@ -46,11 +47,16 @@ export function isMobileLinkRequest(req: Request) {
 }
 
 export function assertMobileLinkControl(req: Request) {
-  const origin = `${req.protocol}://${req.get("host")}`;
+  // ACT: 反向代理（nginx）终止 TLS 时，req.protocol 为 http；同源校验需使用转发后的协议。
+  const forwardedProto = req.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const protocol = forwardedProto === "https" || forwardedProto === "http" ? forwardedProto : req.protocol;
+  const origin = `${protocol}://${req.get("host")}`;
   const sameOrigin = req.get("origin") === undefined ? req.get("referer")?.startsWith(`${origin}/`) : req.get("origin") === origin;
   const localSocket = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress ?? "");
   const localHost = ["localhost", "127.0.0.1", "[::1]"].includes(req.hostname);
-  if (isMobileLinkRequest(req) || !localSocket || !localHost || !sameOrigin ||
+  // ACT: 桌面宿主仍只允许本机管理；服务端宿主允许同源页面远程管理（由 nginx Basic 提供访问控制）。
+  const remoteAllowed = !getRuntimePlatform().requiresLocalHost;
+  if (isMobileLinkRequest(req) || (!(localSocket && localHost) && !remoteAllowed) || !sameOrigin ||
     (req.get("x-toonflow-mobile-link") !== "1" && req.get("x-toonflow-workspace") !== "1")) {
     throw Object.assign(new Error("只允许本机 Toonflow 页面管理设备互联"), { status: 403 });
   }
