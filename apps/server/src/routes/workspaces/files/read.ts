@@ -6,14 +6,40 @@ import { z } from "zod";
 import u from "@/utils";
 import { validateFields } from "@/lib/middleware";
 import { success } from "@/lib/responseFormat";
+import { getImagePreview, isImagePreviewEnabled } from "@/utils/media/imagePreview";
 
 const router = Router();
 
-export default router.get("/", validateFields({ directory: z.string().min(1).max(4096), path: z.string().max(4096), snapshot: z.enum(["true"]).optional(), maxBytes: z.coerce.number().int().positive().max(20 * 1024 * 1024).optional() }, "query"), async (req, res, next) => {
+export default router.get("/", validateFields({ directory: z.string().min(1).max(4096), path: z.string().max(4096), snapshot: z.enum(["true"]).optional(), maxBytes: z.coerce.number().int().positive().max(20 * 1024 * 1024).optional(), preview: z.coerce.number().int().min(64).max(4096).optional() }, "query"), async (req, res, next) => {
   const { path } = await u.workspaceFile.resolveWorkspaceFile(req, req.query.directory as string, req.query.path as string);
   const file = await lstat(path);
   if (!file.isFile()) throw Object.assign(new Error("只能读取文件"), { status: 400 });
   res.set("Cache-Control", "no-store");
+  // ACT: 预览变体只用于展示；失败或不可转换时回退原文件，绝不改变原图与其余读取行为。
+  const preview = req.query.preview === undefined ? undefined : Number(req.query.preview);
+  if (preview !== undefined && req.query.snapshot !== "true" && isImagePreviewEnabled()) {
+    try {
+      const result = await getImagePreview(path, { size: file.size, mtimeMs: file.mtimeMs }, preview);
+      if (result) {
+        res.set("Cache-Control", "private, max-age=86400");
+        res.set("Content-Type", "image/webp");
+        res.set("ETag", result.etag);
+        res.set("X-Preview", "1");
+        if (req.headers["if-none-match"] === result.etag) {
+          res.status(304).end();
+          return;
+        }
+        if (req.method === "HEAD") {
+          res.status(200).end();
+          return;
+        }
+        res.end(Buffer.from(result.data));
+        return;
+      }
+    } catch (error) {
+      console.warn("图片预览生成失败，回退原图", error);
+    }
+  }
   if (req.query.snapshot === "true") {
     const maxBytes = req.query.maxBytes === undefined ? undefined : Number(req.query.maxBytes);
     if (maxBytes !== undefined && file.size > maxBytes) throw Object.assign(new Error("文件超过本次文本读取的大小限制"), { status: 413 });

@@ -57,13 +57,17 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
     return data;
   }
 
-  function acquireUrl(path: string, mimeType?: string) {
+  function acquireUrl(path: string, mimeType?: string, options?: { preview?: number | false }) {
     const directory = getDirectory();
-    const key = JSON.stringify([directory, path, mimeType]);
+    // ACT: 展示用取图默认请求 2048px WebP 预览；需要原图时显式传 preview: false。
+    const preview = options?.preview === undefined ? 2048 : options.preview;
+    const key = JSON.stringify([directory, path, mimeType, preview]);
     let entry = fileUrls.get(key);
     if (!entry) {
-      const url = client.get<Blob>("/read", { params: { directory, path }, responseType: "blob" })
-        .then(({ data }) => URL.createObjectURL(mimeType ? new Blob([data], { type: mimeType }) : data));
+      const params = preview ? { directory, path, preview } : { directory, path };
+      const url = client.get<Blob>("/read", { params, responseType: "blob" })
+        // ACT: 预览响应自带 image/webp，优先使用服务端返回的 MIME，避免被原 mimeType 覆盖。
+        .then(({ data }) => URL.createObjectURL(data.type ? data : (mimeType ? new Blob([data], { type: mimeType }) : data)));
       entry = { directory, path, url, users: 0 };
       fileUrls.set(key, entry);
       const current = entry;
