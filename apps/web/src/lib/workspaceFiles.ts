@@ -9,6 +9,12 @@ export type TextSnapshot = { text: string; revision: string; encoding: "utf-8" |
 const client = axios.create({ baseURL: "/api/workspaces/files", headers: { "x-toonflow-workspace": "1" } });
 registerApiLanguage(client);
 const fileUrls = new Map<string, { directory: string; path: string; url: Promise<string>; users: number }>();
+// ACT: 记录预览 blob 对应的原始工作区文件；下载时据此换回原图，避免把预览当成品下载。
+const previewSources = new Map<string, { directory: string; path: string; mimeType?: string }>();
+
+export function resolvePreviewSource(blobUrl: string) {
+  return previewSources.get(blobUrl);
+}
 
 function cachePath(path: string) {
   return path.replaceAll("\\", "/").split("/").filter(part => part && part !== ".").join("/").toLowerCase();
@@ -67,7 +73,12 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
       const params = preview ? { directory, path, preview } : { directory, path };
       const url = client.get<Blob>("/read", { params, responseType: "blob" })
         // ACT: 预览响应自带 image/webp，优先使用服务端返回的 MIME，避免被原 mimeType 覆盖。
-        .then(({ data }) => URL.createObjectURL(data.type ? data : (mimeType ? new Blob([data], { type: mimeType }) : data)));
+        .then(({ data }) => URL.createObjectURL(data.type ? data : (mimeType ? new Blob([data], { type: mimeType }) : data)))
+        .then(objectUrl => {
+          // 视频/音频不做预览变体，blob 本身就是原文件，无需下载时二次拉取。
+          if (preview && !/^(video|audio)\//i.test(mimeType ?? "")) previewSources.set(objectUrl, { directory, path, mimeType });
+          return objectUrl;
+        });
       entry = { directory, path, url, users: 0 };
       fileUrls.set(key, entry);
       const current = entry;
@@ -84,7 +95,10 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
         if (--current.users) return;
         if (fileUrls.get(key) === current) fileUrls.delete(key);
         // 等待中的读取也要在最后一个使用者离开后释放，不撤销其他节点仍使用的 URL。
-        void current.url.then(url => URL.revokeObjectURL(url), () => {});
+        void current.url.then(url => {
+          previewSources.delete(url);
+          URL.revokeObjectURL(url);
+        }, () => {});
       },
     };
   }

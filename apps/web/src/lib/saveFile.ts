@@ -1,6 +1,10 @@
 import axios from "axios";
 import { ElMessage } from "element-plus";
 import { actualPlatform } from "./platform";
+import { resolvePreviewSource } from "./workspaceFiles";
+
+// ACT: saveFile 内部的下载锚点不再被全局下载拦截器二次捕获。
+let internalSave = false;
 
 declare global {
   interface WindowEventMap {
@@ -56,7 +60,12 @@ export default async function saveFile(content: Blob | (() => Promise<Blob>), fi
   link.href = url;
   link.download = fileName;
   document.body.append(link);
-  link.click();
+  internalSave = true;
+  try {
+    link.click();
+  } finally {
+    internalSave = false;
+  }
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
   return true;
@@ -65,6 +74,7 @@ export default async function saveFile(content: Blob | (() => Promise<Blob>), fi
 export function registerDownloads() {
   const pending = new WeakSet<HTMLAnchorElement>();
   function handleDownload(event: MouseEvent) {
+    if (internalSave) return;
     const link = event.composedPath().find(element => element instanceof HTMLAnchorElement && element.hasAttribute("download")) as HTMLAnchorElement | undefined;
     if (!link?.href || event.button !== 0) return;
     const url = new URL(link.href);
@@ -73,14 +83,22 @@ export function registerDownloads() {
     if (pending.has(link) || link.getAttribute("aria-disabled") === "true") return;
     pending.add(link);
     link.dispatchEvent(new CustomEvent("downloadstate", { detail: true }));
-    // ACT: 捕获同源下载以兼容已安装节点；Android 先暂存内容，再交给系统文件选择器。
-    void saveFile(() => axios.get<Blob>(url.href, { responseType: "blob" }).then(({ data }) => data), link.download || "download").catch(error => {
+    // ACT: 预览 blob 下载一律换回工作区原文件；其余同源链接保持原行为（Android 先暂存内容再交给系统选择器）。
+    const source = url.protocol === "blob:" ? resolvePreviewSource(url.href) : undefined;
+    const content = source
+      ? () => axios.get<Blob>("/api/workspaces/files/read", {
+        params: { directory: source.directory, path: source.path },
+        headers: { "x-toonflow-workspace": "1" },
+        responseType: "blob",
+      }).then(({ data }) => source.mimeType ? new Blob([data], { type: source.mimeType }) : data)
+      : () => axios.get<Blob>(url.href, { responseType: "blob" }).then(({ data }) => data);
+    void saveFile(content, link.download || "download").catch(error => {
       ElMessage.error(axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || error.message : error instanceof Error ? error.message : "保存文件失败");
     }).finally(() => {
       pending.delete(link);
       link.dispatchEvent(new CustomEvent("downloadstate", { detail: false }));
     });
   }
-  if (actualPlatform.isDesktop || actualPlatform.isMobile) document.addEventListener("click", handleDownload, true);
+  document.addEventListener("click", handleDownload, true);
   return () => document.removeEventListener("click", handleDownload, true);
 }
